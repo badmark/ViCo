@@ -4,7 +4,7 @@
 # Title: ViCo - Recursive Video Compressor
 # Description: Recursively finds video files, validates them, compresses them
 #              using ffmpeg. Auto-detects hardware acceleration.
-#              Includes Interactive Menu and HTML Reporting.
+#              Includes Interactive Menu and HTML Reporting with FPS stats.
 #
 # Usage: ./vicomp.sh [flags] [directory]
 #
@@ -110,6 +110,7 @@ generate_html_report() {
     tr:hover { background-color: #f5f5f5; }
     .success { color: green; font-weight: bold; }
     .error { color: red; }
+    .stats { font-family: monospace; color: #555; }
 </style>
 </head>
 <body>
@@ -121,6 +122,7 @@ generate_html_report() {
             <th>Original Size</th>
             <th>New Size</th>
             <th>Reduction</th>
+            <th>Avg FPS</th>
             <th>Status</th>
         </tr>
 EOF
@@ -276,7 +278,8 @@ process_videos() {
         exit 1
     fi
 
-    find "$TARGET_DIR" -type f \( -iname "*.mp4" -o -iname "*.mkv" -o -iname "*.mov" -o -iname "*.avi" \) -print0 | while IFS= read -r -d '' file; do
+    # Use process substitution to avoid subshell variable scope issues
+    while IFS= read -r -d '' file; do
         
         if [[ "$file" == *"$SUFFIX.mp4" ]]; then continue; fi
         if [[ "$file" == *".temp_optim.mp4" ]]; then continue; fi
@@ -334,13 +337,26 @@ process_videos() {
             CMD="ffmpeg -n -v error -stats -i \"$file\" -c:v $V_CODEC -crf $CRF_VALUE -preset $DEFAULT_PRESET -vf \"$SCALE_FILTER\" $A_FLAGS -movflags +faststart \"${file%.*}.temp_optim.mp4\""
         fi
 
-        # Run
-        eval "$CMD" < /dev/null
+        # Create a temp log file to capture stderr for FPS parsing
+        FFLOG=$(mktemp)
         
+        # Run: Redirect stderr to stdout, pipe to tee to show progress AND save to log
+        # We use PIPESTATUS to get the exit code of ffmpeg, not tee
+        echo "  > Starting encoding..."
+        eval "$CMD" 2>&1 | tee "$FFLOG"
+        RET=${PIPESTATUS[0]}
+        
+        # Extract FPS from the last few lines of the log
+        # Looks like: frame= 123 fps= 30 q=28.0 ...
+        AVG_FPS=$(grep -oE "fps=[[:space:]]*[0-9.]+" "$FFLOG" | tail -1 | sed 's/fps=//' | tr -d ' ')
+        [ -z "$AVG_FPS" ] && AVG_FPS="N/A"
+
+        rm "$FFLOG"
+
         # Post-Process
         TEMP_FILE="${file%.*}.temp_optim.mp4"
         
-        if [ $? -eq 0 ] && [ -s "$TEMP_FILE" ]; then
+        if [ $RET -eq 0 ] && [ -s "$TEMP_FILE" ]; then
             END_SIZE=$(get_file_size "$TEMP_FILE")
             
             # Calculate percentage reduction
@@ -357,22 +373,22 @@ process_videos() {
             mv "$TEMP_FILE" "$FINAL_NAME"
             [ "$OVERWRITE" = true ] && [ "$file" != "$FINAL_NAME" ] && rm "$file"
 
-            echo "  > Done. Reduced by $PCT%"
+            echo "  > Done. Reduced by $PCT%. Avg FPS: $AVG_FPS"
             
             if [ "$GENERATE_HTML" = true ]; then
-                ROW="<tr><td>$(basename "$file")</td><td>$(format_size $START_SIZE)</td><td>$(format_size $END_SIZE)</td><td class='success'>-$PCT%</td><td>Success</td></tr>"
+                ROW="<tr><td>$(basename "$file")</td><td>$(format_size $START_SIZE)</td><td>$(format_size $END_SIZE)</td><td class='success'>-$PCT%</td><td class='stats'>$AVG_FPS</td><td>Success</td></tr>"
                 REPORT_DATA+=("$ROW")
             fi
         else
             echo "  > Failed."
             [ -f "$TEMP_FILE" ] && rm "$TEMP_FILE"
             if [ "$GENERATE_HTML" = true ]; then
-                ROW="<tr><td>$(basename "$file")</td><td>$(format_size $START_SIZE)</td><td>-</td><td>-</td><td class='error'>Failed</td></tr>"
+                ROW="<tr><td>$(basename "$file")</td><td>$(format_size $START_SIZE)</td><td>-</td><td>-</td><td class='stats'>-</td><td class='error'>Failed</td></tr>"
                 REPORT_DATA+=("$ROW")
             fi
         fi
 
-    done
+    done < <(find "$TARGET_DIR" -type f \( -iname "*.mp4" -o -iname "*.mkv" -o -iname "*.mov" -o -iname "*.avi" \) -print0)
 
     if [ "$GENERATE_HTML" = true ]; then
         generate_html_report

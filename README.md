@@ -8,8 +8,8 @@
 * **Hardware Acceleration:** Auto-detects and uses NVIDIA NVENC, Intel QSV, or generic VAAPI.
 * **Smart Audio:** * Defaults to **Copying** audio streams intact.
     * Optional **Downmix** mode converts surround sound to Stereo AAC for compatibility.
-* **Subtitles:** Automatically downloads subtitles matching your system language (if none exist in the file).
-* **Reporting:** Generates a clean HTML report showing file size reduction stats.
+* **Subtitles:** Automatically downloads subtitles matching your system language (if none exist in the file). Includes timeout protection.
+* **Reporting:** Generates a clean HTML report showing file size reduction percentages and **average encoding FPS**.
 
 ## Prerequisites
 
@@ -36,7 +36,7 @@ Simply run the script with no arguments:
 | `--menu` | Force open the interactive menu. |
 | `-r`, `--res <720\|1080\|2160>` | Set target resolution (Default: 1080). |
 | `--downmix` | Re-encode audio and downmix to Stereo (Default: Copy audio). |
-| `--html` | Generate `vico_report.html` with compression stats. |
+| `--html` | Generate `vico_report.html` with compression & FPS stats. |
 | `-k`, `--keep` | Keep original files (save as `_optimized.mp4`). |
 | `-s`, `--subs` | Download subtitles if missing (matches system language). |
 | `--no-hw` | Force CPU encoding. |
