@@ -348,13 +348,28 @@ find "$TARGET_DIR" -type f \( -iname "*.mp4" -o -iname "*.mkv" -o -iname "*.mov"
 
     echo "Processing video using $HW_TYPE..."
 
+    # --- Detect Audio Channels for Intelligent Downmixing ---
+    # We probe the first audio stream to check channel count
+    AUDIO_CHANNELS=$(ffprobe -v error -select_streams a:0 -show_entries stream=channels -of default=noprint_wrappers=1:nokey=1 "$file" | head -n 1)
+
+    # Configure Audio Flags
+    if [[ -z "$AUDIO_CHANNELS" || "$AUDIO_CHANNELS" == "N/A" ]]; then
+        # No audio stream detected, remove audio track
+        echo "  > No audio stream detected."
+        AUDIO_FLAGS="-an"
+    elif [[ "$AUDIO_CHANNELS" -gt 2 ]]; then
+        # Downmix to Stereo to prevent layout errors with AAC and save space
+        echo "  > Detected $AUDIO_CHANNELS channels. Downmixing to Stereo."
+        AUDIO_FLAGS="-c:a $AUDIO_CODEC -b:a $AUDIO_BITRATE -ac 2"
+    else
+        # Pass through Stereo or Mono as is
+        AUDIO_FLAGS="-c:a $AUDIO_CODEC -b:a $AUDIO_BITRATE"
+    fi
+
     # --- Construct FFmpeg Command based on HW_TYPE ---
     
     # Common Scale Filter: Scale to Target Res, maintain aspect ratio, ensure dimensions are divisible by 2
     SCALE_FILTER="scale=-2:$TARGET_RES"
-
-    # Common Audio Flags
-    AUDIO_FLAGS="-c:a $AUDIO_CODEC -b:a $AUDIO_BITRATE"
 
     if [ "$HW_TYPE" == "nvenc" ]; then
         # NVIDIA NVENC Settings
@@ -365,7 +380,6 @@ find "$TARGET_DIR" -type f \( -iname "*.mp4" -o -iname "*.mkv" -o -iname "*.mov"
         fi
         
         # NVENC uses -cq for VBR quality, similar to CRF
-        # Software scaling (CPU) -> HW encoding is usually most compatible
         CMD="ffmpeg -n -v error -stats -i \"$file\" \
              -c:v $V_CODEC -preset p4 -cq $CRF_VALUE \
              -vf \"$SCALE_FILTER\" \
@@ -379,7 +393,6 @@ find "$TARGET_DIR" -type f \( -iname "*.mp4" -o -iname "*.mkv" -o -iname "*.mov"
             V_CODEC="h264_qsv"
         fi
         
-        # QSV often uses -global_quality or -q:v
         CMD="ffmpeg -n -v error -stats \
              -init_hw_device qsv=hw -filter_hw_device hw -i \"$file\" \
              -vf \"$SCALE_FILTER,format=nv12,hwupload=extra_hw_frames=64,format=qsv\" \
@@ -394,9 +407,6 @@ find "$TARGET_DIR" -type f \( -iname "*.mp4" -o -iname "*.mkv" -o -iname "*.mov"
             V_CODEC="h264_vaapi"
         fi
         
-        # VAAPI requires scaling AND format conversion to nv12 AND uploading to GPU
-        # Complex filter chain: scale(sw) -> format -> hwupload
-        # Mapping CRF to -qp (Constant Quantization) roughly equivalent for script usage
         CMD="ffmpeg -n -v error -stats \
              -vaapi_device $HW_DEVICE -i \"$file\" \
              -vf \"$SCALE_FILTER,format=nv12,hwupload\" \
