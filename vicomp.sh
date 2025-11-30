@@ -1,569 +1,506 @@
 #!/bin/bash
 
 # ==============================================================================
-# Title: ViCo - Recursive Video Compressor
-# Description: Recursively finds video files, validates them, compresses them
-#              using ffmpeg. Auto-detects hardware acceleration.
-#              Includes Interactive Menu and HTML Reporting.
-#              (Safe for filenames with spaces and special characters)
-#
-# Usage: ./vicomp.sh [flags] [directory]
-#
-# Arguments:
-#   -h, --help       Show help message.
-#   --menu           Launch interactive configuration menu.
-#   -k, --keep       Keep original files (don't overwrite).
-#   -s, --subs       Download subtitles.
-#   -r, --res VAL    Resolution (720, 1080, 2160).
-#   --no-hw          Disable hardware acceleration.
-#   --downmix        Downmix audio to Stereo.
-#   --html           Generate HTML report of results.
+# Title: ViCo - Recursive Video Compressor (TUI Edition)
+# Description: Robust video optimizer with interactive TUI.
+#              Fixes directory detection, function ordering, and adds cleanup.
+# Dependencies: bash, ffmpeg, ffprobe, dialog
 # ==============================================================================
 
-# --- Context Check ---
-# Robustly handle execution from unstable/deleted directories.
-# If `pwd` fails, we must cd to a valid location to prevent "shell-init" errors
-# in subsequent subshells.
+# --- 1. IMMEDIATE ENVIRONMENT SANITIZATION ---
+# Capture the environment PWD before any commands run, as this persists even
+# if the directory is physically deleted.
+USER_INVOCATION_DIR="$PWD"
+
+# Check if the current directory is actually accessible.
+# If not, switch to HOME to prevent "shell-init" errors in subshells.
 if ! pwd >/dev/null 2>&1; then
-    if [[ -n "$PWD" && -d "$PWD" ]]; then
-        # Try to re-enter the path the shell thinks we are in
-        cd "$PWD" 2>/dev/null || cd "$HOME"
+    if [ -d "$HOME" ]; then
+        cd "$HOME" >/dev/null 2>&1
     else
-        # Fallback to HOME
-        echo "Warning: Current directory inaccessible. Switching context to HOME." >&2
-        cd "$HOME"
+        cd "/tmp" >/dev/null 2>&1
     fi
 fi
-CWD_OUTPUT=$(pwd)
 
-# Set default target
-TARGET_DIR="$CWD_OUTPUT"
+# Now we are in a safe directory. We can resolve paths.
+# If arguments were passed (like .), resolve them relative to where the user WAS.
+REQUESTED_TARGET="$1"
 
-# --- Defaults ---
-DEFAULT_CRF=23
-DEFAULT_PRESET="medium"
-TARGET_RES=1080
+if [ -n "$REQUESTED_TARGET" ]; then
+    # Handle relative paths manually since we changed directory
+    if [[ "$REQUESTED_TARGET" != /* ]]; then
+        # It's relative, prepend the original PWD
+        TARGET_DIR="$USER_INVOCATION_DIR/$REQUESTED_TARGET"
+    else
+        TARGET_DIR="$REQUESTED_TARGET"
+    fi
+else
+    # Default to the directory the user ran the script from
+    TARGET_DIR="$USER_INVOCATION_DIR"
+fi
 
-# Audio
-AUDIO_CODEC="aac"
-AUDIO_BITRATE="128k"
-AUDIO_BITRATE_SURROUND="384k"
+# Clean up path (remove trailing slash, resolve . and ..)
+if command -v realpath &> /dev/null; then
+    # Suppress error if path doesn't exist yet (handled in validation)
+    RESOLVED=$(realpath -m "$TARGET_DIR" 2>/dev/null)
+    [ -n "$RESOLVED" ] && TARGET_DIR="$RESOLVED"
+fi
 
-# Files
-SUFFIX="_optimized"
-REPORT_FILENAME="vico_report.html"
-# Anchor report to the detected CWD
-REPORT_FILE="$TARGET_DIR/$REPORT_FILENAME"
+# --- 2. GLOBAL CONFIGURATION DEFAULTS ---
+CONF_RES="1080"
+CONF_CODEC="264"        # 264 or 265
+CONF_CRF="23"
+CONF_AUDIO="copy"       # copy | downmix
+CONF_HW="auto"          # auto | cpu | nvenc | qsv | vaapi
+CONF_SUBS="false"       # true | false
+CONF_OVERWRITE="true"   # true | false
+CONF_HTML="false"       # true | false
+CONF_RECURSIVE="true"   # true | false
 
-# Toggles
-OVERWRITE=true
-DOWNLOAD_SUBS=false
-DISABLE_HW=false
-DOWNMIX_AUDIO=false
-RECODE_AUDIO=false
-GENERATE_HTML=false
+# Global Temp File Tracker for Cleanup
+CURRENT_TEMP_FILE=""
 
-CODEC="264"
-CRF_VALUE="$DEFAULT_CRF"
+# Stats Tracking
+STATS_TOTAL_FILES=0
+STATS_START_TIME=0
+STATS_END_TIME=0
+REPORT_DATA=()
 
-# Data for Report
-declare -a REPORT_DATA
+# --- 3. SIGNAL TRAP & CLEANUP ---
 
-# ------------------------------------------------------------------------------
-# Helper Functions
-# ------------------------------------------------------------------------------
+cleanup_and_exit() {
+    echo ""
+    echo "=========================================="
+    echo "   STOPPING PROCESSING (User Interrupt)   "
+    echo "=========================================="
+    
+    if [ -n "$CURRENT_TEMP_FILE" ] && [ -f "$CURRENT_TEMP_FILE" ]; then
+        echo "Cleaning up temporary file: $CURRENT_TEMP_FILE"
+        rm -f "$CURRENT_TEMP_FILE"
+    fi
+    
+    echo "Exiting gracefully."
+    exit 1
+}
+
+# Trap SIGINT (Ctrl+C)
+trap cleanup_and_exit SIGINT
+
+# --- 4. HELPER FUNCTIONS ---
 
 usage() {
     echo "Usage: $0 [flags] [directory]"
-    echo ""
-    echo "Flags:"
-    echo "  -h, --help       Show this help message and exit."
-    echo "  --menu           Launch interactive configuration menu."
-    echo "  -k, --keep       Do NOT overwrite original files."
-    echo "  -s, --subs       Download subtitles (matches system language)."
-    echo "  -r, --res VAL    Set resolution: 720, 1080 (default), or 2160."
-    echo "  --no-hw          Force software encoding."
-    echo "  --downmix        Re-encode audio and downmix to Stereo."
-    echo "  --html           Generate HTML report."
-    echo ""
-    echo "Positional Arguments:"
-    echo "  directory        Target directory (default: current: $TARGET_DIR)"
-    echo ""
+    echo "  -h, --help       Show help"
+    echo "  --menu           Force interactive menu"
+    echo "  --no-recursive   Disable recursion"
+    echo "  (See menu for full configuration options)"
+    exit 0
 }
 
-detect_distro() {
-    if [ -f /etc/os-release ]; then
-        . /etc/os-release
-        echo "$ID"
-    else
-        echo "unknown"
+check_deps() {
+    local missing=()
+    for tool in ffmpeg ffprobe dialog; do
+        if ! command -v "$tool" &> /dev/null; then missing+=("$tool"); fi
+    done
+    
+    if [ ${#missing[@]} -gt 0 ]; then
+        echo "Installing dependencies: ${missing[*]}..."
+        if [ -f /etc/os-release ]; then
+            . /etc/os-release
+            case "$ID" in
+                ubuntu|debian|pop|kali) sudo apt-get update && sudo apt-get install -y "${missing[@]}" ;;
+                fedora|centos|rhel)     sudo dnf install -y "${missing[@]}" ;;
+                arch|manjaro)           sudo pacman -S --noconfirm "${missing[@]}" ;;
+                *) echo "Please install manually: ${missing[*]}"; exit 1 ;;
+            esac
+        else
+            echo "Unknown OS. Please install: ${missing[*]}"
+            exit 1
+        fi
     fi
 }
 
-check_dependencies() {
-    for tool in ffmpeg ffprobe; do
-        if ! command -v "$tool" &> /dev/null; then
-            echo "Missing required tool: $tool"
-            read -p "Attempt to auto-install? (y/n) " -n 1 -r
-            echo
-            if [[ $REPLY =~ ^[Yy]$ ]]; then
-                install_ffmpeg
-            else
-                exit 1
-            fi
-        fi
-    done
-}
-
-install_ffmpeg() {
-    DISTRO=$(detect_distro)
-    case "$DISTRO" in
-        ubuntu|debian|pop|kali|raspbian) CMD="sudo apt-get update && sudo apt-get install -y ffmpeg" ;;
-        fedora|centos|rhel|almalinux)    CMD="sudo dnf install -y ffmpeg" ;;
-        arch|manjaro|endeavouros)        CMD="sudo pacman -S --noconfirm ffmpeg" ;;
-        *) echo "Manual install required for $DISTRO"; exit 1 ;;
-    esac
-    eval "$CMD"
-}
-
-get_file_size() {
-    stat -c%s "$1" 2>/dev/null || echo 0
+format_time() {
+    local T=$1
+    local H=$((T/3600))
+    local M=$(( (T%3600)/60 ))
+    local S=$((T%60))
+    printf "%02d:%02d:%02d" $H $M $S
 }
 
 format_size() {
     numfmt --to=iec-i --suffix=B "$1" 2>/dev/null || echo "$1"
 }
 
-# Clean quotes from path string if user pasted them
-clean_path_string() {
-    local p="$1"
-    p="${p%\"}"
-    p="${p#\"}"
-    p="${p%\'}"
-    p="${p#\'}"
-    echo "$p"
-}
+# --- 5. HARDWARE DETECTION ---
 
-# Resolve absolute path
-resolve_path() {
-    local path="$1"
+detect_hardware_capability() {
+    if [ "$CONF_HW" != "auto" ]; then return; fi
     
-    # Trim whitespace
-    path="${path#"${path%%[![:space:]]*}"}"
-    path="${path%"${path##*[![:space:]]}"}"
-
-    path=$(clean_path_string "$path")
-
-    # Default to known valid CWD if empty or dot
-    if [ -z "$path" ] || [ "$path" = "." ]; then
-        echo "$CWD_OUTPUT"
-        return
-    fi
-
-    # 1. Expand tilde
-    if [[ "$path" == "~"* ]]; then
-        path="${path/#\~/$HOME}"
-    fi
+    # Default to CPU
+    CONF_HW="cpu"
     
-    # 2. Resolve absolute path
-    if command -v realpath &> /dev/null; then
-        RESOLVED=$(realpath -q "$path")
-        if [ -n "$RESOLVED" ]; then
-            echo "$RESOLVED"
-        else
-            echo "$path" # Return input if realpath fails (e.g. new dir)
-        fi
-    else
-        # Fallback logic
-        if [ -d "$path" ]; then
-            # Use cd in subshell to resolve, rely on $PWD if pwd fails
-            (cd "$path" >/dev/null 2>&1 && echo "$PWD") || echo "$path"
-        else
-            echo "$path"
-        fi
-    fi
-}
-
-generate_html_report() {
-    echo "Generating HTML Report: $REPORT_FILE"
-    cat <<EOF > "$REPORT_FILE"
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<title>ViCo Compression Report</title>
-<style>
-    body { font-family: sans-serif; padding: 20px; background: #f4f4f9; }
-    table { border-collapse: collapse; width: 100%; background: white; box-shadow: 0 1px 3px rgba(0,0,0,0.2); }
-    th, td { padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }
-    th { background-color: #4CAF50; color: white; }
-    tr:hover { background-color: #f5f5f5; }
-    .success { color: green; font-weight: bold; }
-    .error { color: red; }
-    .stats { font-family: monospace; color: #555; }
-</style>
-</head>
-<body>
-    <h1>Compression Report</h1>
-    <p>Generated on $(date)</p>
-    <table>
-        <tr>
-            <th>File</th>
-            <th>Original Size</th>
-            <th>New Size</th>
-            <th>Reduction</th>
-            <th>Avg FPS</th>
-            <th>Status</th>
-        </tr>
-EOF
-
-    for row in "${REPORT_DATA[@]}"; do
-        echo "$row" >> "$REPORT_FILE"
-    done
-
-    cat <<EOF >> "$REPORT_FILE"
-    </table>
-</body>
-</html>
-EOF
-    echo "Report saved to $REPORT_FILE"
-}
-
-detect_hardware() {
-    if [ "$DISABLE_HW" = true ]; then
-        HW_TYPE="cpu"
-        return
-    fi
-
     ENCODERS=$(ffmpeg -hide_banner -encoders 2>/dev/null)
 
-    # NVIDIA
+    # Nvidia
     if echo "$ENCODERS" | grep -q "nvenc"; then
-        if ls /dev/nvidia* 1> /dev/null 2>&1; then
-            HW_TYPE="nvenc"
+        if command -v nvidia-smi &> /dev/null; then
+            CONF_HW="nvenc"
             return
         fi
     fi
 
-    find_render_device() {
-        local vendor="$1"
-        for dev in /sys/class/drm/renderD*; do
-            if [ -e "$dev/device/vendor" ] && grep -q "$vendor" "$dev/device/vendor"; then
-                 echo "/dev/dri/$(basename "$dev")"
-                 return 0
+    # Intel QSV (Prioritize over VAAPI for Intel)
+    for dev in /sys/class/drm/renderD*; do
+        if [ -e "$dev/device/vendor" ] && grep -q "0x8086" "$dev/device/vendor"; then
+            if echo "$ENCODERS" | grep -q "qsv"; then
+                CONF_HW="qsv"
+                HW_DEVICE="/dev/dri/$(basename "$dev")"
+                return
             fi
-        done
-        return 1
-    }
-
-    # Intel QSV (0x8086)
-    if echo "$ENCODERS" | grep -q "qsv"; then
-        INTEL_DEV=$(find_render_device "0x8086")
-        if [ -n "$INTEL_DEV" ]; then
-            HW_TYPE="qsv"
-            HW_DEVICE="$INTEL_DEV"
-            return
         fi
-    fi
+    done
 
-    # VAAPI (AMD/Intel Fallback)
+    # VAAPI (AMD or Intel Fallback)
     if echo "$ENCODERS" | grep -q "vaapi"; then
         if ls /dev/dri/renderD* 1> /dev/null 2>&1; then
-            # Safe way to get first device
+            CONF_HW="vaapi"
             HW_DEVICE=$(ls /dev/dri/renderD* | head -n 1)
-            HW_TYPE="vaapi"
             return
         fi
     fi
-
-    HW_TYPE="cpu"
 }
 
-# ------------------------------------------------------------------------------
-# Menu System
-# ------------------------------------------------------------------------------
+# --- 6. INTERACTIVE MENU ---
 
-show_menu() {
+show_main_menu() {
+    # Ensure TARGET_DIR is sane before showing menu
+    [ -z "$TARGET_DIR" ] && TARGET_DIR="$USER_INVOCATION_DIR"
+
+    # Initialize default selection
+    SELECTION="1"
+
     while true; do
-        clear
-        DISPLAY_DIR=$(resolve_path "$TARGET_DIR")
+        # Dynamic Descriptions
+        local d_audio="Copy Audio"
+        [ "$CONF_AUDIO" == "downmix" ] && d_audio="Downmix (Stereo)"
         
-        if [ -z "$DISPLAY_DIR" ]; then
-            DISPLAY_DIR="$TARGET_DIR (Invalid/Not Found)"
-            DIR_VALID=false
-        else
-            DIR_VALID=true
-        fi
+        local d_hw="Auto-Detect"
+        [ "$CONF_HW" == "cpu" ] && d_hw="Force CPU"
+        
+        local d_subs="Skip"
+        [ "$CONF_SUBS" == "true" ] && d_subs="Download"
+        
+        local d_rec="Yes"
+        [ "$CONF_RECURSIVE" == "false" ] && d_rec="No (Flat)"
+        
+        local d_ow="Overwrite"
+        [ "$CONF_OVERWRITE" == "false" ] && d_ow="Keep Original"
 
-        echo "=========================================="
-        echo "   ViCo - Video Compressor Configurator   "
-        echo "=========================================="
-        echo "1.  Target Directory    [$DISPLAY_DIR]"
-        echo "2.  Resolution          [${TARGET_RES}p]"
-        echo "3.  Codec               [H.$CODEC]"
-        echo "4.  CRF (Quality)       [$CRF_VALUE]"
-        echo "------------------------------------------"
-        echo "5.  Audio Mode          [$( [ "$RECODE_AUDIO" = true ] && ([ "$DOWNMIX_AUDIO" = true ] && echo "Downmix Stereo" || echo "Re-encode Multi") || echo "Copy Intact" )]"
-        echo "6.  Hardware Accel      [$( [ "$DISABLE_HW" = true ] && echo "Disabled (CPU)" || echo "Auto-Detect" )]"
-        echo "7.  Subtitles           [$( [ "$DOWNLOAD_SUBS" = true ] && echo "Download" || echo "Skip" )]"
-        echo "8.  Overwrite Files     [$( [ "$OVERWRITE" = true ] && echo "Yes" || echo "No (Keep Original)" )]"
-        echo "9.  HTML Report         [$( [ "$GENERATE_HTML" = true ] && echo "Yes" || echo "No" )]"
-        echo "------------------------------------------"
-        echo "P.  Proceed / Start"
-        echo "Q.  Quit"
-        echo "=========================================="
-        read -p "Select Option: " OPT
+        local d_html="No"
+        [ "$CONF_HTML" == "true" ] && d_html="Yes"
 
-        case $OPT in
-            1) 
-               read -p "Enter Path: " -e NEW_PATH 
-               NEW_PATH=$(clean_path_string "$NEW_PATH")
-               if [ -n "$NEW_PATH" ]; then TARGET_DIR="$NEW_PATH"; fi
-               ;;
+        # Display Menu
+        CHOICE=$(dialog --stdout --clear --backtitle "ViCo - Video Compressor" \
+            --title "Configuration" \
+            --default-item "$SELECTION" \
+            --menu "Directory: $TARGET_DIR" 20 70 12 \
+            "1" "START PROCESSING" \
+            "2" "Target Directory" \
+            "3" "Resolution [$CONF_RES]" \
+            "4" "Codec [H.$CONF_CODEC]" \
+            "5" "CRF [$CONF_CRF]" \
+            "6" "Audio [$d_audio]" \
+            "7" "Hardware [$d_hw]" \
+            "8" "Recursion [$d_rec]" \
+            "9" "Subtitles [$d_subs]" \
+            "10" "Overwrite [$d_ow]" \
+            "11" "HTML Report [$d_html]" \
+            "0" "Exit")
+
+        # Store selection to return to it
+        SELECTION="$CHOICE"
+
+        case $CHOICE in
+            1) break ;; 
             2) 
-                echo "Select Resolution: 1) 720p  2) 1080p  3) 2160p"
-                read -r r_opt
-                case $r_opt in
-                    1) TARGET_RES=720 ;;
-                    2) TARGET_RES=1080 ;;
-                    3) TARGET_RES=2160 ;;
-                esac
+                # File Browser
+                # Ensure we browse starting from the target dir with a trailing slash
+                # to force dialog to enter the directory
+                local browse_start="${TARGET_DIR%/}/"
+                NEW_DIR=$(dialog --stdout --title "Select Directory" --dselect "$browse_start" 14 70)
+                if [ -n "$NEW_DIR" ]; then
+                    TARGET_DIR="${NEW_DIR%/}"
+                    [ -z "$TARGET_DIR" ] && TARGET_DIR="/"
+                fi
                 ;;
             3)
-                echo "Select Codec: 1) H.264  2) H.265 (HEVC)"
-                read -r c_opt
-                [[ "$c_opt" == "2" ]] && CODEC="265" || CODEC="264"
+                CONF_RES=$(dialog --stdout --title "Resolution" --radiolist "Select Target Height" 15 50 5 \
+                    "720" "720p" off "1080" "1080p" on "2160" "4K" off)
+                [ -z "$CONF_RES" ] && CONF_RES="1080"
                 ;;
-            4) read -p "Enter CRF (18-28, lower is better): " CRF_VALUE ;;
+            4)
+                CONF_CODEC=$(dialog --stdout --title "Codec" --radiolist "Select Codec" 15 50 5 \
+                    "264" "H.264 (AVC)" on "265" "H.265 (HEVC)" off)
+                [ -z "$CONF_CODEC" ] && CONF_CODEC="264"
+                ;;
             5)
-                echo "Audio Mode: 1) Copy Intact (Default)  2) Re-encode (Keep Channels)  3) Downmix to Stereo"
-                read -r a_opt
-                case $a_opt in
-                    1) RECODE_AUDIO=false; DOWNMIX_AUDIO=false ;;
-                    2) RECODE_AUDIO=true; DOWNMIX_AUDIO=false ;;
-                    3) RECODE_AUDIO=true; DOWNMIX_AUDIO=true ;;
-                esac
+                CONF_CRF=$(dialog --stdout --title "CRF" --inputbox "Enter Quality (18-28). Lower=Better." 8 60 "$CONF_CRF")
                 ;;
-            6) 
-                if [ "$DISABLE_HW" = true ]; then DISABLE_HW=false; else DISABLE_HW=true; fi
+            6)
+                local aud=$(dialog --stdout --title "Audio" --radiolist "Audio Mode" 15 60 5 \
+                    "copy" "Copy Stream Intact" on "downmix" "Re-encode to Stereo AAC" off)
+                [ -n "$aud" ] && CONF_AUDIO="$aud"
                 ;;
-            7) 
-                if [ "$DOWNLOAD_SUBS" = true ]; then DOWNLOAD_SUBS=false; else DOWNLOAD_SUBS=true; fi
+            7)
+                local hw=$(dialog --stdout --title "Hardware" --radiolist "Hardware Acceleration" 15 60 5 \
+                    "auto" "Auto-Detect" on "cpu" "Force CPU Only" off)
+                [ -n "$hw" ] && CONF_HW="$hw"
                 ;;
-            8) 
-                if [ "$OVERWRITE" = true ]; then OVERWRITE=false; else OVERWRITE=true; fi
-                ;;
+            8)
+                if [ "$CONF_RECURSIVE" == "true" ]; then CONF_RECURSIVE="false"; else CONF_RECURSIVE="true"; fi ;;
             9)
-                if [ "$GENERATE_HTML" = true ]; then GENERATE_HTML=false; else GENERATE_HTML=true; fi
-                ;;
-            [Pp]) 
-                if [ "$DIR_VALID" = true ]; then
-                    break
-                else
-                    echo "Error: Invalid directory. Please select a valid path."
-                    sleep 2
-                fi
-                ;;
-            [Qq]) exit 0 ;;
-            *) echo "Invalid option." ;;
+                if [ "$CONF_SUBS" == "true" ]; then CONF_SUBS="false"; else CONF_SUBS="true"; fi ;;
+            10)
+                if [ "$CONF_OVERWRITE" == "true" ]; then CONF_OVERWRITE="false"; else CONF_OVERWRITE="true"; fi ;;
+            11)
+                if [ "$CONF_HTML" == "true" ]; then CONF_HTML="false"; else CONF_HTML="true"; fi ;;
+            0) clear; echo "Exiting."; exit 0 ;;
+            *) clear; echo "Exiting."; exit 0 ;;
         esac
     done
+    clear
 }
 
-# ------------------------------------------------------------------------------
-# Processing Logic
-# ------------------------------------------------------------------------------
+# --- 7. PROCESSING LOGIC ---
 
-process_videos() {
-    ABS_TARGET_DIR=$(resolve_path "$TARGET_DIR")
-    
-    detect_hardware
-    
-    echo ""
-    echo "--- Job Configuration ---"
-    echo "Directory: '$ABS_TARGET_DIR'"
-    echo "Target:    ${TARGET_RES}p / H.${CODEC} / CRF $CRF_VALUE"
-    echo "Hardware:  $HW_TYPE"
-    echo "Audio:     $( [ "$RECODE_AUDIO" = true ] && echo "Re-encode" || echo "Copy" ) $( [ "$DOWNMIX_AUDIO" = true ] && echo "+ Downmix" )"
-    echo "Report:    $GENERATE_HTML"
-    echo "-------------------------"
-    sleep 1
-
-    if [ -z "$ABS_TARGET_DIR" ] || [ ! -d "$ABS_TARGET_DIR" ]; then
-        echo "Error: Directory not found or not accessible: '$TARGET_DIR'"
+process_files() {
+    # Double check target existence
+    if [ ! -d "$TARGET_DIR" ]; then
+        echo "Error: Directory not found: $TARGET_DIR"
+        echo "Please check the path and permissions."
         exit 1
     fi
+
+    detect_hardware_capability
     
-    # Global flags for all ffmpeg commands to prevent stalling and excessive logging
-    # -nostdin: Critical for running inside loops/scripts to prevent reading from stdin
-    FF_FLAGS="-nostdin -n -v error -stats"
+    echo "=========================================="
+    echo "Starting Processing"
+    echo "Dir: $TARGET_DIR"
+    echo "HW:  $CONF_HW"
+    echo "Rec: $CONF_RECURSIVE"
+    echo "=========================================="
+    STATS_START_TIME=$SECONDS
 
-    # Use process substitution to avoid subshell variable scope issues
-    while IFS= read -r -d '' file; do
+    # HTML Header
+    REPORT_PATH="$TARGET_DIR/vico_report.html"
+    if [ "$CONF_HTML" == "true" ]; then
+        cat <<EOF > "$REPORT_PATH"
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><title>ViCo Report</title>
+<style>body{font-family:sans-serif;background:#f4f4f9;padding:20px}table{width:100%;border-collapse:collapse;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.2)}th,td{padding:12px;border-bottom:1px solid #ddd;text-align:left}th{background:#4CAF50;color:#fff}.good{color:green;font-weight:bold}.bad{color:red}</style>
+</head><body><h1>ViCo Compression Report</h1><p>Date: $(date)</p><table>
+<tr><th>File</th><th>Orig Size</th><th>New Size</th><th>Reduced</th><th>FPS</th><th>Status</th></tr>
+EOF
+    fi
+
+    # Build Find Command
+    FIND_CMD=(find "$TARGET_DIR" -type f \( -iname "*.mp4" -o -iname "*.mkv" -o -iname "*.mov" -o -iname "*.avi" \))
+    if [ "$CONF_RECURSIVE" == "false" ]; then
+        FIND_CMD+=(-maxdepth 1)
+    fi
+
+    # Main Loop
+    # Use FD 9 to prevent ffmpeg stealing stdin
+    while IFS= read -r -d '' -u 9 file; do
         
-        if [[ "$file" == *"$SUFFIX.mp4" ]]; then continue; fi
-        if [[ "$file" == *".temp_optim.mp4" ]]; then continue; fi
+        if [[ "$file" == *"_optimized.mp4" ]] || [[ "$file" == *".temp_vico.mp4" ]]; then continue; fi
+        
+        STATS_TOTAL_FILES=$((STATS_TOTAL_FILES + 1))
+        BASENAME=$(basename "$file")
+        DIRNAME=$(dirname "$file")
+        NAME_NOEXT="${BASENAME%.*}"
+        TEMP_FILE="$DIRNAME/${NAME_NOEXT}.temp_vico.mp4"
+        
+        # Set global tracker for cleanup trap
+        CURRENT_TEMP_FILE="$TEMP_FILE"
+        
+        if [ "$CONF_OVERWRITE" == "true" ]; then
+            FINAL_FILE="${DIRNAME}/${NAME_NOEXT}.mp4"
+        else
+            FINAL_FILE="${DIRNAME}/${NAME_NOEXT}_optimized.mp4"
+        fi
 
-        echo "Processing: $file"
-        START_SIZE=$(get_file_size "$file")
+        echo "[$STATS_TOTAL_FILES] Processing: $BASENAME"
 
-        # Validate
-        if ! ffprobe -v error -select_streams v:0 -show_entries stream=codec_type "$file" 2>/dev/null | grep -q "codec_type=video"; then
-            echo "  > Invalid video file. Skipping."
+        # Validate Video
+        if ! ffprobe -v error -select_streams v:0 -show_entries stream=codec_type "$file" < /dev/null 2>/dev/null | grep -q "video"; then
+            echo "   > Skipped (Not a valid video)"
+            if [ "$CONF_HTML" == "true" ]; then
+                echo "<tr><td>$BASENAME</td><td>-</td><td>-</td><td>-</td><td>-</td><td class='bad'>Invalid</td></tr>" >> "$REPORT_PATH"
+            fi
             continue
         fi
+        
+        START_SIZE=$(stat -c%s "$file")
 
         # Subtitles
-        if [ "$DOWNLOAD_SUBS" = true ]; then
-            HAS_SUBS=$(ffprobe -v error -select_streams s -show_entries stream=index -of csv=p=0 "$file")
-            if [ -n "$HAS_SUBS" ]; then
-                echo "  > Subtitles present. Skipping download."
-            else
-                SYS_LANG="${LANG%%_*}"; [ -z "$SYS_LANG" ] && SYS_LANG="en"
-                timeout 30s subliminal download -l "$SYS_LANG" "$file"
+        if [ "$CONF_SUBS" == "true" ]; then
+            if ! ffprobe -v error -select_streams s -show_entries stream=index -of csv=p=0 "$file" < /dev/null 2>/dev/null | grep -q .; then
+                SLANG="${LANG%%_*}"; [ -z "$SLANG" ] && SLANG="en"
+                echo "   > Downloading subtitles..."
+                timeout 30s subliminal download -l "$SLANG" "$file" < /dev/null >/dev/null 2>&1
             fi
         fi
 
-        # Audio Logic
-        declare -a A_FLAGS
-        if [ "$RECODE_AUDIO" = true ]; then
-            CHANNELS=$(ffprobe -v error -select_streams a:0 -show_entries stream=channels -of default=noprint_wrappers=1:nokey=1 "$file" | head -n 1)
-            if [[ -z "$CHANNELS" || "$CHANNELS" == "N/A" ]]; then
-                A_FLAGS=(-an)
-            elif [ "$DOWNMIX_AUDIO" = true ] && [ "$CHANNELS" -gt 2 ]; then
-                echo "  > Downmixing $CHANNELS channels to Stereo."
-                A_FLAGS=(-c:a "$AUDIO_CODEC" -b:a "$AUDIO_BITRATE" -ac 2)
+        # Audio Settings
+        if [ "$CONF_AUDIO" == "downmix" ]; then
+            CH=$(ffprobe -v error -select_streams a:0 -show_entries stream=channels -of default=noprint_wrappers=1:nokey=1 "$file" < /dev/null 2>/dev/null)
+            if [[ "$CH" -gt 2 ]]; then
+                A_OPTS="-c:a aac -b:a 128k -ac 2"
             else
-                echo "  > Keeping audio channels."
-                A_FLAGS=(-c:a "$AUDIO_CODEC" -b:a "$AUDIO_BITRATE")
-                if [ "$CHANNELS" -gt 2 ]; then
-                     A_FLAGS=(-c:a "$AUDIO_CODEC" -b:a "$AUDIO_BITRATE_SURROUND" -ac "$CHANNELS")
-                fi
+                A_OPTS="-c:a aac -b:a 128k"
             fi
         else
-            echo "  > Copying audio stream."
-            A_FLAGS=(-c:a copy)
+            A_OPTS="-c:a copy"
         fi
 
-        # Video Logic
-        SCALE_FILTER="scale=-2:$TARGET_RES"
-        declare -a V_FLAGS
-        declare -a HW_FLAGS
+        # Video Settings
+        SCALE="-vf scale=-2:$CONF_RES"
         
-        TEMP_FILE="${file%.*}.temp_optim.mp4"
-
-        if [ "$HW_TYPE" == "nvenc" ]; then
-            if [[ "$CODEC" == "265" ]]; then ENC="hevc_nvenc"; else ENC="h264_nvenc"; fi
-            V_FLAGS=(-c:v "$ENC" -preset p4 -cq "$CRF_VALUE" -vf "$SCALE_FILTER")
-            
-        elif [ "$HW_TYPE" == "qsv" ]; then
-            if [[ "$CODEC" == "265" ]]; then ENC="hevc_qsv"; else ENC="h264_qsv"; fi
+        if [ "$CONF_HW" == "nvenc" ]; then
+            [ "$CONF_CODEC" == "265" ] && V_ENC="hevc_nvenc" || V_ENC="h264_nvenc"
+            CMD_PRE="ffmpeg -y -nostdin -hwaccel cuda -hwaccel_output_format cuda -i"
+            CMD_POST="-c:v $V_ENC -preset p4 -cq $CONF_CRF $SCALE"
+        elif [ "$CONF_HW" == "qsv" ]; then
+            [ "$CONF_CODEC" == "265" ] && V_ENC="hevc_qsv" || V_ENC="h264_qsv"
             export LIBVA_DRIVER_NAME=iHD
-            HW_FLAGS=(-init_hw_device "vaapi=va:$HW_DEVICE" -init_hw_device "qsv=hw@va" -filter_hw_device hw)
-            V_FLAGS=(-vf "${SCALE_FILTER},format=nv12,hwupload=extra_hw_frames=64,format=qsv" -c:v "$ENC" -global_quality "$CRF_VALUE" -preset medium)
-            
-        elif [ "$HW_TYPE" == "vaapi" ]; then
-            if [[ "$CODEC" == "265" ]]; then ENC="hevc_vaapi"; else ENC="h264_vaapi"; fi
-            HW_FLAGS=(-vaapi_device "$HW_DEVICE")
-            V_FLAGS=(-vf "${SCALE_FILTER},format=nv12,hwupload" -c:v "$ENC" -qp "$CRF_VALUE")
-            
+            CMD_PRE="ffmpeg -y -nostdin -init_hw_device vaapi=va:$HW_DEVICE -init_hw_device qsv=hw@va -filter_hw_device hw -i"
+            CMD_POST="-vf scale=-2:$CONF_RES,format=nv12,hwupload=extra_hw_frames=64,format=qsv -c:v $V_ENC -global_quality $CONF_CRF -preset medium"
+        elif [ "$CONF_HW" == "vaapi" ]; then
+            [ "$CONF_CODEC" == "265" ] && V_ENC="hevc_vaapi" || V_ENC="h264_vaapi"
+            CMD_PRE="ffmpeg -y -nostdin -vaapi_device $HW_DEVICE -i"
+            CMD_POST="-vf scale=-2:$CONF_RES,format=nv12,hwupload -c:v $V_ENC -qp $CONF_CRF"
         else
-            if [[ "$CODEC" == "265" ]]; then ENC="libx265"; else ENC="libx264"; fi
-            V_FLAGS=(-c:v "$ENC" -crf "$CRF_VALUE" -preset "$DEFAULT_PRESET" -vf "$SCALE_FILTER")
+            [ "$CONF_CODEC" == "265" ] && V_ENC="libx265" || V_ENC="libx264"
+            CMD_PRE="ffmpeg -y -nostdin -i"
+            CMD_POST="-c:v $V_ENC -crf $CONF_CRF -preset medium $SCALE"
         fi
 
-        FFLOG=$(mktemp)
+        FULL_CMD="$CMD_PRE \"$file\" $CMD_POST $A_OPTS -movflags +faststart \"$TEMP_FILE\""
         
-        CMD_ARRAY=(ffmpeg "${BASE_FF_ARGS[@]}" "${HW_FLAGS[@]}" -i "$file" "${V_FLAGS[@]}" "${A_FLAGS[@]}" -movflags +faststart "$TEMP_FILE")
-        
-        "${CMD_ARRAY[@]}" 2>&1 | tee "$FFLOG"
+        # Run FFmpeg
+        LOG=$(mktemp)
+        eval "$FULL_CMD" 2>&1 | tee "$LOG"
         RET=${PIPESTATUS[0]}
         
-        AVG_FPS=$(grep -oE "fps=[[:space:]]*[0-9.]+" "$FFLOG" | tail -1 | sed 's/fps=//' | tr -d ' ')
-        [ -z "$AVG_FPS" ] && AVG_FPS="N/A"
-        rm "$FFLOG"
+        # Stats
+        FPS=$(grep -oE "fps=[[:space:]]*[0-9.]+" "$LOG" | tail -1 | sed 's/fps=//' | tr -d ' ')
+        [ -z "$FPS" ] && FPS="N/A"
+        rm "$LOG"
 
+        # Handle Success/Fail
         if [ $RET -eq 0 ] && [ -s "$TEMP_FILE" ]; then
-            END_SIZE=$(get_file_size "$TEMP_FILE")
-            
-            if [ "$START_SIZE" -gt 0 ]; then
+            END_SIZE=$(stat -c%s "$TEMP_FILE")
+            if [ $START_SIZE -gt 0 ]; then
                 DIFF=$((START_SIZE - END_SIZE))
                 PCT=$(awk "BEGIN {printf \"%.2f\", ($DIFF / $START_SIZE) * 100}")
             else
                 PCT="0"
             fi
-
-            FINAL_NAME="${file%.*}.mp4"
-            [ "$OVERWRITE" = false ] && FINAL_NAME="${file%.*}${SUFFIX}.mp4"
             
-            mv "$TEMP_FILE" "$FINAL_NAME"
-            [ "$OVERWRITE" = true ] && [ "$file" != "$FINAL_NAME" ] && rm "$file"
-
-            echo "  > Done. Reduced by $PCT%. Avg FPS: $AVG_FPS"
+            mv "$TEMP_FILE" "$FINAL_FILE"
             
-            if [ "$GENERATE_HTML" = true ]; then
-                ROW="<tr><td>$(basename "$file")</td><td>$(format_size $START_SIZE)</td><td>$(format_size $END_SIZE)</td><td class='success'>-$PCT%</td><td class='stats'>$AVG_FPS</td><td>Success</td></tr>"
-                REPORT_DATA+=("$ROW")
+            if [ "$CONF_OVERWRITE" == "true" ] && [ "$file" != "$FINAL_FILE" ]; then
+                rm "$file"
+            fi
+            
+            echo "   > Success. Reduced by $PCT%. FPS: $FPS"
+            if [ "$CONF_HTML" == "true" ]; then
+                S1=$(format_size $START_SIZE); S2=$(format_size $END_SIZE)
+                echo "<tr><td>$BASENAME</td><td>$S1</td><td>$S2</td><td class='good'>-$PCT%</td><td>$FPS</td><td>OK</td></tr>" >> "$REPORT_PATH"
             fi
         else
-            echo "  > Failed."
+            echo "   > Failed."
             [ -f "$TEMP_FILE" ] && rm "$TEMP_FILE"
-            if [ "$GENERATE_HTML" = true ]; then
-                ROW="<tr><td>$(basename "$file")</td><td>$(format_size $START_SIZE)</td><td>-</td><td>-</td><td class='stats'>-</td><td class='error'>Failed</td></tr>"
-                REPORT_DATA+=("$ROW")
+            if [ "$CONF_HTML" == "true" ]; then
+                S1=$(format_size $START_SIZE)
+                echo "<tr><td>$BASENAME</td><td>$S1</td><td>-</td><td>-</td><td>-</td><td class='bad'>Fail</td></tr>" >> "$REPORT_PATH"
             fi
         fi
+        
+        # Clear temp tracker
+        CURRENT_TEMP_FILE=""
 
-    done < <(find "$ABS_TARGET_DIR" -type f \( -iname "*.mp4" -o -iname "*.mkv" -o -iname "*.mov" -o -iname "*.avi" \) -print0)
+    done 9< <("${FIND_CMD[@]}" -print0)
 
-    if [ "$GENERATE_HTML" = true ]; then
-        generate_html_report
+    STATS_END_TIME=$SECONDS
+    
+    if [ "$CONF_HTML" == "true" ]; then
+        echo "</table></body></html>" >> "$REPORT_PATH"
     fi
+    
+    print_synopsis
 }
 
-# ------------------------------------------------------------------------------
-# Parse Args or Launch Menu
-# ------------------------------------------------------------------------------
-
-if [ $# -eq 0 ]; then
-    show_menu
-    check_dependencies
-    process_videos
-else
-    while [[ $# -gt 0 ]]; do
-      case $1 in
-        -h|--help) usage; exit 0 ;;
-        --menu) show_menu; check_dependencies; process_videos; exit 0 ;;
-        -k|--keep) OVERWRITE=false; shift ;;
-        -s|--subs) DOWNLOAD_SUBS=true; shift ;;
-        -r|--res) TARGET_RES="$2"; shift 2 ;;
-        --no-hw) DISABLE_HW=true; shift ;;
-        --downmix) RECODE_AUDIO=true; DOWNMIX_AUDIO=true; shift ;;
-        --html) GENERATE_HTML=true; shift ;;
-        *) 
-           # Attempt to reconstruct paths with spaces from split arguments
-           if [ -n "$TARGET_DIR" ] && [ "$TARGET_DIR" != "." ] && [ "$TARGET_DIR" != "$CWD_OUTPUT" ]; then
-               # If we already have a path, append this chunk with a space
-               TARGET_DIR="$TARGET_DIR $1"
-           else
-               # First chunk
-               TARGET_DIR="$1"
-               
-               # Heuristics: if it looks like a codec or number, treat as such immediately
-               if [[ "$1" =~ ^[0-9]+$ ]] && [ -z "$ARG_CRF_SET" ] && [ ! -d "$1" ]; then 
-                    CODEC="265"; CRF_VALUE="$1"; ARG_CRF_SET=1
-                    TARGET_DIR="." # Reset if it was just a number
-               elif [[ "$1" == "264" || "$1" == "265" ]]; then 
-                    CODEC="$1"
-                    TARGET_DIR="." # Reset
-               fi
-           fi
-           shift 
-           ;;
-      esac
-    done
+print_synopsis() {
+    local duration=$((STATS_END_TIME - STATS_START_TIME))
+    local h=$((duration/3600))
+    local m=$(( (duration%3600)/60 ))
+    local s=$((duration%60))
     
-    TARGET_DIR=$(clean_path_string "$TARGET_DIR")
-    check_dependencies
-    process_videos
+    echo ""
+    echo "=========================================="
+    echo "           ViCo Execution Summary         "
+    echo "=========================================="
+    printf "  Total Files:            %d\n" "$STATS_TOTAL_FILES"
+    printf "  Total Duration:         %02d:%02d:%02d\n" $h $m $s
+    if [ "$CONF_HTML" == "true" ]; then
+        echo "  Report:                 $REPORT_PATH"
+    fi
+    echo "=========================================="
+}
+
+# --- 8. ENTRY POINT ---
+
+check_deps
+
+# Check flags
+FORCE_MENU=false
+# If no arguments are provided, default to menu mode
+if [ $# -eq 0 ]; then FORCE_MENU=true; fi
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h|--help) usage ;;
+        --menu) FORCE_MENU=true; shift ;;
+        --no-recursive) CONF_RECURSIVE="false"; shift ;;
+        # Basic CLI overrides could be expanded here
+        *) 
+           if [ -d "$1" ]; then REQUESTED_TARGET="$1"; shift
+           else shift; fi 
+           ;;
+    esac
+done
+
+if [ "$FORCE_MENU" == "true" ]; then
+    show_main_menu
+else
+    # Headless logic
+    if [ -n "$REQUESTED_TARGET" ]; then
+        # Handle relative/absolute logic same as menu
+        if [[ "$REQUESTED_TARGET" != /* ]]; then
+             TARGET_DIR="$USER_START_DIR/$REQUESTED_TARGET"
+        else
+             TARGET_DIR="$REQUESTED_TARGET"
+        fi
+    else
+        TARGET_DIR="$USER_START_DIR"
+    fi
+    
+    if command -v realpath &> /dev/null; then
+        TARGET_DIR=$(realpath "$TARGET_DIR")
+    fi
 fi
+
+process_files

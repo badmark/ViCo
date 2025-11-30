@@ -1,31 +1,41 @@
-# ViCo - Recursive Video Compressor & Optimizer
+# ViCo - Recursive Video Compressor (TUI Edition)
 
-**ViCo** (`vicomp.sh`) is a powerful command-line and menu-driven tool for recursively optimizing video collections. It intelligently handles resolution scaling, hardware acceleration (NVENC, QSV, VAAPI), and audio processing while offering robust reporting capabilities.
+**ViCo** (`vicomp.sh`) is a robust, menu-driven Bash utility for recursively optimizing video collections. It features a text-based user interface (TUI) for easy configuration, automatic hardware acceleration detection (NVENC, QSV, VAAPI), and intelligent error handling for robust batch processing.
 
 ## Features
 
-* **Interactive Menu:** Run without arguments to open a TUI menu to configure all settings easily.
-* **Hardware Acceleration:** Auto-detects and uses NVIDIA NVENC, Intel QSV, or generic VAAPI.
-* **Smart Audio:** * Defaults to **Copying** audio streams intact.
-    * Optional **Downmix** mode converts surround sound to Stereo AAC for compatibility.
-* **Subtitles:** Automatically downloads subtitles matching your system language (if none exist in the file). Includes timeout protection.
-* **Reporting:** Generates a clean HTML report showing file size reduction percentages and **average encoding FPS**.
+* **Interactive Menu (TUI):** A user-friendly text interface to browse directories and toggle settings without memorizing flags.
+* **Hardware Acceleration:** Automatically detects and prioritizes:
+  1. **NVIDIA NVENC**
+  2. **Intel QSV (Quick Sync Video)**
+  3. **VAAPI (Intel/AMD Generic)**
+  4. **CPU (Software Fallback)**
+* **Robust Path Handling:** Safely handles filenames with spaces, special characters, and executes reliably even if the shell environment is unstable.
+* **Smart Audio:** Defaults to copying audio streams bit-for-bit. Optional downmixing to Stereo AAC available.
+* **Reporting:** Generates a detailed HTML report showing file size reduction percentages and average encoding FPS.
+* **Safety:** Includes signal trapping to clean up temporary files if the script is interrupted.
 
 ## Prerequisites
 
-* `ffmpeg`
-* `ffprobe`
-* `subliminal` (Optional, for subtitles)
+The script will attempt to auto-install dependencies if they are missing (supports Debian/Ubuntu, Fedora/RHEL, Arch, OpenSUSE).
+
+* **bash**
+* **ffmpeg** (Required): For video encoding.
+* **ffprobe** (Required): For video stream validation.
+* **dialog** (Required): For the interactive menu interface.
+* **subliminal** (Optional): Required only if using the `-s` flag for subtitles.
 
 ## Usage
 
-### 1. Interactive Menu
-Simply run the script with no arguments:
+### 1. Interactive Mode (Recommended)
+Simply run the script. It will launch a graphical menu in the terminal.
 ```bash
 ./vicomp.sh
 ```
 
-### 2. Command Line
+### 2. Command Line / Headless
+You can bypass the menu by providing flags or a directory argument.
+
 ```bash
 ./vicomp.sh [FLAGS] [DIRECTORY]
 ```
@@ -33,27 +43,46 @@ Simply run the script with no arguments:
 #### Flags
 | Flag | Description |
 | :--- | :--- |
-| `--menu` | Force open the interactive menu. |
-| `-r`, `--res <720\|1080\|2160>` | Set target resolution (Default: 1080). |
-| `--downmix` | Re-encode audio and downmix to Stereo (Default: Copy audio). |
-| `--html` | Generate `vico_report.html` with compression & FPS stats. |
-| `-k`, `--keep` | Keep original files (save as `_optimized.mp4`). |
-| `-s`, `--subs` | Download subtitles if missing (matches system language). |
-| `--no-hw` | Force CPU encoding. |
+| `-h`, `--help` | Show help message. |
+| `--menu` | Force launch of the interactive configuration menu. |
+| `-k`, `--keep` | **Keep Mode:** Do NOT overwrite original files. Saves as `_optimized.mp4`. |
+| `-s`, `--subs` | **Subtitles:** Download subtitles matching system language. |
+| `-r`, `--res VAL` | **Resolution:** Target vertical resolution (720, 1080, 2160). |
+| `--no-hw` | **Force Software:** Disable hardware acceleration. |
+| `--downmix` | **Downmix Audio:** Re-encode audio to Stereo AAC (Default is Copy). |
+| `--no-recursive` | **Flat Scan:** Process only the target folder, ignoring subdirectories. |
+| `--html` | **Report:** Generate `vico_report.html` with stats. |
 
-#### Examples
+### Examples
 
-**Standard 1080p Optimization (Overwrite, Copy Audio):**
+**Open the Menu for the current directory:**
+```bash
+./vicomp.sh
+```
+
+**Headless 1080p compression (Overwrite originals, Copy Audio):**
 ```bash
 ./vicomp.sh /media/movies
 ```
 
-**Generate Report + Downmix Audio to Stereo:**
+**Process current folder only (no subfolders), Downmix audio:**
 ```bash
-./vicomp.sh --html --downmix /media/tv
+./vicomp.sh --no-recursive --downmix .
 ```
 
-**Force CPU, Keep Originals, 720p:**
+**Force CPU encoding for 4K files:**
 ```bash
-./vicomp.sh --no-hw -k -r 720 /media/archive
+./vicomp.sh --no-hw -r 2160 /path/to/videos 265 24
 ```
+
+## Installation
+
+1.  Save the script code to a file named `vicomp.sh`.
+2.  Make the script executable:
+    ```bash
+    chmod +x vicomp.sh
+    ```
+3.  Run it:
+    ```bash
+    ./vicomp.sh
+    ```
