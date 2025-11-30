@@ -11,6 +11,7 @@
   3. **VAAPI (Intel/AMD Generic)**
   4. **CPU (Software Fallback)**
 * **Resolution Scaling:** Options to scale videos to 720p, 1080p (default), or 2160p (4K).
+* **Smart Audio Processing:** Automatically downmixes multi-channel audio to Stereo for compatibility, with options to keep original channels or pass-through audio streams without re-encoding.
 * **Smart Overwriting:** Choose to overwrite original files or keep separate optimized versions.
 * **Subtitle Support:** Optionally downloads English subtitles using `subliminal`.
 * **Format Support:** Handles MP4, MKV, MOV, and AVI containers.
@@ -21,7 +22,7 @@ The script will attempt to auto-install dependencies if they are missing (suppor
 
 * **ffmpeg** (Required): For video encoding.
 * **ffprobe** (Required): For video stream validation.
-* **subliminal** (Optional): Required only if using the `-s` flag for subtitles. Ensure that subliminal is configured with at least one provider or else script could stall
+* **subliminal** (Optional): Required only if using the `-s` flag for subtitles. *Note: At least one provider must be configured.*
 
 ## Usage
 
@@ -38,6 +39,8 @@ The script will attempt to auto-install dependencies if they are missing (suppor
 | `-s`, `--subs` | **Subtitles:** Attempt to download English subtitles for the video. |
 | `-r`, `--res VAL` | **Resolution:** Target vertical resolution. Options: `720`, `1080` (default), `2160`. |
 | `--no-hw` | **Force Software:** Disable hardware acceleration and force CPU encoding. |
+| `--keep-audio` | **Keep Channels:** Preserve original audio channels (prevents default downmix to Stereo). |
+| `--copy-audio` | **Copy Audio:** Pass the audio stream through directly without re-encoding. |
 
 ### Positional Arguments
 
@@ -69,6 +72,11 @@ The script will attempt to auto-install dependencies if they are missing (suppor
 **4. Force CPU encoding (ignore GPU) for 4K:**
 ```bash
 ./vicomp.sh --no-hw -r 2160 /path/to/videos 265 24
+```
+
+**5. Preserve 5.1 Surround Sound:**
+```bash
+./vicomp.sh --keep-audio /path/to/movies
 ```
 
 ## Installation

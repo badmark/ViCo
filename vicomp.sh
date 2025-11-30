@@ -14,6 +14,8 @@
 #   -s, --subs       Download subtitles (English) using 'subliminal'.
 #   -r, --res VAL    Set resolution: 720, 1080 (default), or 2160.
 #   --no-hw          Force software encoding (disable hardware acceleration).
+#   --keep-audio     Keep original audio channels (disable downmix to stereo).
+#   --copy-audio     Copy audio stream as-is (disable re-encoding).
 #
 #   directory        Target directory (default: current)
 #   codec            264 (default) or 265
@@ -41,6 +43,8 @@ SUFFIX="_optimized"
 OVERWRITE=true
 DOWNLOAD_SUBS=false
 DISABLE_HW=false
+DOWNMIX_AUDIO=true
+RECODE_AUDIO=true
 
 # ------------------------------------------------------------------------------
 
@@ -54,6 +58,8 @@ usage() {
     echo "  -s, --subs       Download subtitles (English) using 'subliminal'."
     echo "  -r, --res VAL    Resolution (720, 1080, 2160). Default: 1080."
     echo "  --no-hw          Disable hardware acceleration."
+    echo "  --keep-audio     Keep multiple audio channels (don't downmix to stereo)."
+    echo "  --copy-audio     Copy audio stream directly (no re-encoding/downmixing)."
     echo ""
     echo "Positional Arguments:"
     echo "  directory        Target directory (default: current)"
@@ -88,6 +94,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --no-hw)
       DISABLE_HW=true
+      shift # past argument
+      ;;
+    --keep-audio)
+      DOWNMIX_AUDIO=false
+      shift # past argument
+      ;;
+    --copy-audio)
+      RECODE_AUDIO=false
       shift # past argument
       ;;
     *)
@@ -357,13 +371,20 @@ find "$TARGET_DIR" -type f \( -iname "*.mp4" -o -iname "*.mkv" -o -iname "*.mov"
         # No audio stream detected, remove audio track
         echo "  > No audio stream detected."
         AUDIO_FLAGS="-an"
-    elif [[ "$AUDIO_CHANNELS" -gt 2 ]]; then
-        # Downmix to Stereo to prevent layout errors with AAC and save space
-        echo "  > Detected $AUDIO_CHANNELS channels. Downmixing to Stereo."
-        AUDIO_FLAGS="-c:a $AUDIO_CODEC -b:a $AUDIO_BITRATE -ac 2"
+    elif [ "$RECODE_AUDIO" = false ]; then
+        echo "  > Copying audio stream (no re-encode)."
+        AUDIO_FLAGS="-c:a copy"
     else
-        # Pass through Stereo or Mono as is
-        AUDIO_FLAGS="-c:a $AUDIO_CODEC -b:a $AUDIO_BITRATE"
+        # Re-encoding audio based on channel count preferences
+        if [ "$DOWNMIX_AUDIO" = true ] && [ "$AUDIO_CHANNELS" -gt 2 ]; then
+            # Downmix to Stereo to prevent layout errors with AAC and save space
+            echo "  > Detected $AUDIO_CHANNELS channels. Downmixing to Stereo."
+            AUDIO_FLAGS="-c:a $AUDIO_CODEC -b:a $AUDIO_BITRATE -ac 2"
+        else
+            # Keep original channel count
+            echo "  > Keeping audio channels ($AUDIO_CHANNELS)."
+            AUDIO_FLAGS="-c:a $AUDIO_CODEC -b:a $AUDIO_BITRATE"
+        fi
     fi
 
     # --- Construct FFmpeg Command based on HW_TYPE ---
