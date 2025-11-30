@@ -21,7 +21,7 @@ The script will attempt to auto-install dependencies if they are missing (suppor
 
 * **ffmpeg** (Required): For video encoding.
 * **ffprobe** (Required): For video stream validation.
-* **subliminal** (Optional): Required only if using the `-s` flag for subtitles.
+* **subliminal** (Optional): Required only if using the `-s` flag for subtitles. Ensure that subliminal is configured with at least one provider or else script could stall
 
 ## Usage
 
