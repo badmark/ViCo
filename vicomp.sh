@@ -225,8 +225,6 @@ show_main_menu() {
             1) break ;; 
             2) 
                 # File Browser
-                # Ensure we browse starting from the target dir with a trailing slash
-                # to force dialog to enter the directory
                 local browse_start="${TARGET_DIR%/}/"
                 NEW_DIR=$(dialog --stdout --title "Select Directory" --dselect "$browse_start" 14 70)
                 if [ -n "$NEW_DIR" ]; then
@@ -275,10 +273,9 @@ show_main_menu() {
 # --- 7. PROCESSING LOGIC ---
 
 process_files() {
-    # Double check target existence
+    # Validate Target
     if [ ! -d "$TARGET_DIR" ]; then
         echo "Error: Directory not found: $TARGET_DIR"
-        echo "Please check the path and permissions."
         exit 1
     fi
 
@@ -295,9 +292,12 @@ process_files() {
     # HTML Header
     REPORT_PATH="$TARGET_DIR/vico_report.html"
     if [ "$CONF_HTML" == "true" ]; then
+        # Added meta refresh tag for live updates
         cat <<EOF > "$REPORT_PATH"
 <!DOCTYPE html>
-<html lang="en"><head><meta charset="UTF-8"><title>ViCo Report</title>
+<html lang="en"><head><meta charset="UTF-8">
+<meta http-equiv="refresh" content="5">
+<title>ViCo Report</title>
 <style>body{font-family:sans-serif;background:#f4f4f9;padding:20px}table{width:100%;border-collapse:collapse;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.2)}th,td{padding:12px;border-bottom:1px solid #ddd;text-align:left}th{background:#4CAF50;color:#fff}.good{color:green;font-weight:bold}.bad{color:red}</style>
 </head><body><h1>ViCo Compression Report</h1><p>Date: $(date)</p><table>
 <tr><th>File</th><th>Orig Size</th><th>New Size</th><th>Reduced</th><th>FPS</th><th>Status</th></tr>
@@ -391,6 +391,7 @@ EOF
         
         # Run FFmpeg
         LOG=$(mktemp)
+        # Use pipe to tee to show progress on stdout while capturing to log for stats
         eval "$FULL_CMD" 2>&1 | tee "$LOG"
         RET=${PIPESTATUS[0]}
         
@@ -438,6 +439,8 @@ EOF
     
     if [ "$CONF_HTML" == "true" ]; then
         echo "</table></body></html>" >> "$REPORT_PATH"
+        # Remove the refresh tag from the final report to stop reloading
+        sed -i '/http-equiv="refresh"/d' "$REPORT_PATH"
     fi
     
     print_synopsis
@@ -490,12 +493,12 @@ else
     if [ -n "$REQUESTED_TARGET" ]; then
         # Handle relative/absolute logic same as menu
         if [[ "$REQUESTED_TARGET" != /* ]]; then
-             TARGET_DIR="$USER_START_DIR/$REQUESTED_TARGET"
+             TARGET_DIR="$USER_INVOCATION_DIR/$REQUESTED_TARGET"
         else
              TARGET_DIR="$REQUESTED_TARGET"
         fi
     else
-        TARGET_DIR="$USER_START_DIR"
+        TARGET_DIR="$USER_INVOCATION_DIR"
     fi
     
     if command -v realpath &> /dev/null; then

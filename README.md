@@ -12,7 +12,7 @@
   4. **CPU (Software Fallback)**
 * **Robust Path Handling:** Safely handles filenames with spaces, special characters, and executes reliably even if the shell environment is unstable.
 * **Smart Audio:** Defaults to copying audio streams bit-for-bit. Optional downmixing to Stereo AAC available.
-* **Reporting:** Generates a detailed HTML report showing file size reduction percentages and average encoding FPS.
+* **Live Reporting:** Generates a detailed HTML report (`vico_report.html`) that auto-refreshes while processing to show real-time progress, file size reduction, and encoding speed (FPS). Now includes **Total Saved Space** summary in MB/GB.
 * **Safety:** Includes signal trapping to clean up temporary files if the script is interrupted.
 
 ## Prerequisites
@@ -51,7 +51,7 @@ You can bypass the menu by providing flags or a directory argument.
 | `--no-hw` | **Force Software:** Disable hardware acceleration. |
 | `--downmix` | **Downmix Audio:** Re-encode audio to Stereo AAC (Default is Copy). |
 | `--no-recursive` | **Flat Scan:** Process only the target folder, ignoring subdirectories. |
-| `--html` | **Report:** Generate `vico_report.html` with stats. |
+| `--html` | **Report:** Generate `vico_report.html` with live stats. |
 
 ### Examples
 
@@ -70,9 +70,9 @@ You can bypass the menu by providing flags or a directory argument.
 ./vicomp.sh --no-recursive --downmix .
 ```
 
-**Force CPU encoding for 4K files:**
+**Force CPU encoding for 4K files with HTML report:**
 ```bash
-./vicomp.sh --no-hw -r 2160 /path/to/videos 265 24
+./vicomp.sh --no-hw --html -r 2160 /path/to/videos 265 24
 ```
 
 ## Installation
