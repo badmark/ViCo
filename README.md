@@ -7,13 +7,17 @@
 * **Interactive Menu (TUI):** A user-friendly text interface to browse directories and toggle settings without memorizing flags.
 * **Hardware Acceleration:** Automatically detects and prioritizes:
   1. **NVIDIA NVENC**
-  2. **Intel QSV (Quick Sync Video)**
+  2. **Intel QSV (Quick Sync Video)** - *Uses explicit `iHD` driver handling.*
   3. **VAAPI (Intel/AMD Generic)**
   4. **CPU (Software Fallback)**
 * **Robust Path Handling:** Safely handles filenames with spaces, special characters, and executes reliably even if the shell environment is unstable.
-* **Smart Audio:** Defaults to copying audio streams bit-for-bit. Optional downmixing to Stereo AAC available.
-* **Live Reporting:** Generates a detailed HTML report (`vico_report.html`) that auto-refreshes while processing to show real-time progress, file size reduction, and encoding speed (FPS). Now includes **Total Saved Space** summary in MB/GB.
-* **Safety:** Includes signal trapping to clean up temporary files if the script is interrupted.
+* **Smart Audio:** * **Default:** Copies audio streams bit-for-bit (no quality loss). 
+    * **Downmix:** Optional mode to re-encode and downmix multi-channel audio to Stereo AAC.
+* **Live Reporting:** Generates a detailed HTML report (`vico_report.html`) that:
+    * **Auto-refreshes** every 5 seconds during processing.
+    * Tracks Original Size, New Size, Percentage Reduced, and Encoding FPS.
+    * **Summary:** Displays total storage space saved (MB/GB) and total execution time upon completion.
+* **Safety:** Includes signal trapping to clean up temporary files if the script is interrupted (Ctrl+C).
 
 ## Prerequisites
 
@@ -28,7 +32,7 @@ The script will attempt to auto-install dependencies if they are missing (suppor
 ## Usage
 
 ### 1. Interactive Mode (Recommended)
-Simply run the script. It will launch a graphical menu in the terminal.
+Simply run the script. It will launch a graphical menu in the terminal allowing you to browse for a folder and configure settings.
 ```bash
 ./vicomp.sh
 ```
